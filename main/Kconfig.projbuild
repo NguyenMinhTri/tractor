@@ -1,0 +1,27 @@
+menu "Application Tractor Config"
+
+config ESP_WIFI_SSID
+    string "WiFi SSID"
+    default "myssid"
+    help
+	SSID (network name) for the example to connect to.
+
+config ESP_WIFI_PASSWORD
+    string "WiFi Password"
+    default "mypassword"
+    help
+	WiFi password (WPA or WPA2) for the example to use.
+
+config HX_WRITE
+    int "Pin to HX711"
+    default 32
+    help
+    Pin to write to HX711.
+
+config HX_READ
+    int "Pin from HX711"
+    default 33
+    help
+    Pin to read from HX711.
+
+endmenu
