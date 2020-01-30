@@ -1,4 +1,16 @@
+//TODO: receive a command from iotc via mqtt and print it
+//TODO: execute the command to update itself to last version
+//TODO: get last version available - cloud function that returns file to use
+//TODO: save self version on the bin (time?)
+//TODO: check self version
+//TODO: compare self and last version
+
+//TODO: recreate jwt token on disconnection
+
+
 #include <stdlib.h>
+#include <time.h>
+#include <string.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -8,34 +20,31 @@
 #include "esp_log.h"
 #include "nvs_flash.h"
 #include "jsmn.h"
-#include <time.h>
 #include "lwip/apps/sntp.h"
 #include "driver/gpio.h"
 
 #include <iotc.h>
 #include <iotc_jwt.h>
 
+#define VERSION "0.1.0"
+//static const char *TAG = "TractorApp";
+#define TAG "TractorApp"
 
 #define HX_SCK CONFIG_HX_WRITE
 #define HX_DT CONFIG_HX_READ
 
-static const char *TAG = "TractorApp";
 
-//private key for the iotc
-extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
-//extern const uint8_t ec_pv_key_end[] asm("_binary_private_key_pem_end");
 
 #define IOTC_UNUSED(x) (void)(x)
 #define DEVICE_PATH "projects/%s/locations/%s/registries/%s/devices/%s"
 #define PUBLISH_TOPIC_EVENT "/devices/%s/events"
-//#define PUBLISH_TOPIC_STATE "/devices/%s/state"
-//#define SUBSCRIBE_TOPIC_COMMAND "/devices/%s/commands/#"
+#define PUBLISH_TOPIC_STATE "/devices/%s/state"
+#define SUBSCRIBE_TOPIC_COMMAND "/devices/%s/commands/#"
 //#define SUBSCRIBE_TOPIC_CONFIG "/devices/%s/config"
-//#define CONFIG_GIOT_PROJECT_ID
-//#define CONFIG_GIOT_LOCATION
-//#define CONFIG_GIOT_REGISTRY_ID
-//#define CONFIG_GIOT_DEVICE_ID
 
+#define COMMAND_UPDATE_NOW 777
+
+extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
 char *subscribe_topic_command, *subscribe_topic_config;
 iotc_mqtt_qos_t iotc_example_qos = IOTC_MQTT_QOS_AT_LEAST_ONCE;
 static iotc_timed_task_handle_t delayed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
@@ -159,46 +168,49 @@ void publish_telemetry_event(iotc_context_handle_t context_handle, iotc_timed_ta
 	asprintf(&publish_message, "{\"m\":%ld}", hx_read(5));
 	ESP_LOGI(TAG, "publishing msg `%s` to topic: `%s`", publish_message, publish_topic);
 	
-	iotc_publish(context_handle, publish_topic, publish_message, iotc_example_qos,
-			/*callback=*/NULL, /*user_data=*/NULL);
+	iotc_publish(context_handle, publish_topic, publish_message, iotc_example_qos, /*callback=*/NULL, /*user_data=*/NULL);
 	free(publish_topic);
 	free(publish_message);
 }
 
-//void iotc_mqttlogic_subscribe_callback(
-//    iotc_context_handle_t in_context_handle,
-//    iotc_sub_call_type_t call_type,
-//    const iotc_sub_call_params_t *const params,
-//    iotc_state_t state,
-//    void *user_data)
-//{
-//    IOTC_UNUSED(in_context_handle);
-//    IOTC_UNUSED(call_type);
-//    IOTC_UNUSED(state);
-//    IOTC_UNUSED(user_data);
-//    if (params != NULL && params->message.topic != NULL) {
-//        ESP_LOGI(TAG, "Subscription Topic: %s\n", params->message.topic);
-//        char *sub_message = (char *)malloc(params->message.temporary_payload_data_length + 1);
-//        if (sub_message == NULL) {
-//            ESP_LOGE(TAG, "Failed to allocate memory");
-//            return;
-//        }
-//        memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
-//        sub_message[params->message.temporary_payload_data_length] = '\0';
-//        ESP_LOGI(TAG, "Message Payload: %s \n", sub_message);
-//        if (strcmp(subscribe_topic_command, params->message.topic) == 0) {
-//            int value;
-//            sscanf(sub_message, "{\"outlet\": %d}", &value);
-//            ESP_LOGI(TAG, "value: %d\n", value);
-//            if (value == 1) {
-//                gpio_set_level(OUTPUT_GPIO, true);
-//            } else if (value == 0) {
-//                gpio_set_level(OUTPUT_GPIO, false);
-//            }
-//        }
-//        free(sub_message);
-//    }
-//}
+void iotc_mqttlogic_subscribe_callback(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
+	IOTC_UNUSED(in_context_handle);
+	IOTC_UNUSED(call_type);
+	IOTC_UNUSED(state);
+	IOTC_UNUSED(user_data);
+	
+	// if these are null, nothing will work
+	if (params == NULL && params->message.topic == NULL) {
+		return;
+	}
+
+	if (call_type == IOTC_SUB_CALL_SUBACK) {
+		ESP_LOGI(TAG, "mqtt subscribed successfully");
+		return;
+	}
+
+	if (call_type == IOTC_SUB_CALL_MESSAGE) {
+		char *sub_message = (char *) malloc(params->message.temporary_payload_data_length + 1);
+		if (sub_message == NULL) {
+			ESP_LOGE(TAG, "failed to allocate memory to receive message from topic `%s`", params->message.topic);
+			return;
+		}
+		memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
+		sub_message[params->message.temporary_payload_data_length] = '\0';
+//		ESP_LOGI(TAG, "payload received: `%s`", sub_message);
+		
+		int command = 0;
+		sscanf(sub_message, "%d", &command);
+		
+		if (command == COMMAND_UPDATE_NOW) {
+			ESP_LOGI(TAG, "command acknowledged: will update now");
+		} else {
+			ESP_LOGI(TAG, "command not acknowledged: %d", command);
+		}
+		
+		free(sub_message);
+	}
+}
 
 void on_connection_state_changed(iotc_context_handle_t in_context_handle, void *data, iotc_state_t state) {
 	iotc_connection_data_t *conn_data = (iotc_connection_data_t *) data;
@@ -209,21 +221,20 @@ void on_connection_state_changed(iotc_context_handle_t in_context_handle, void *
 		case IOTC_CONNECTION_STATE_OPENED:
 			ESP_LOGI(TAG, "iotc connection has opened successfully with known state %d", state);
 			
-			/* Publish immediately upon connect. 'publish_function' is defined
-			   in this example file and invokes the IoTC API to publish a
-			   message. */
-//        asprintf(&subscribe_topic_command, SUBSCRIBE_TOPIC_COMMAND, CONFIG_GIOT_DEVICE_ID);
-//        ESP_LOGI(TAG, "subscribe to topic: \"%s\"\n", subscribe_topic_command);
-//        iotc_subscribe(in_context_handle, subscribe_topic_command, IOTC_MQTT_QOS_AT_LEAST_ONCE,
-//                       &iotc_mqttlogic_subscribe_callback, NULL);
-//
+			
+			// subscribe to command topic
+			// for now we use this for commanding an update
+	        asprintf(&subscribe_topic_command, SUBSCRIBE_TOPIC_COMMAND, CONFIG_GIOT_DEVICE_ID);
+    	    ESP_LOGI(TAG, "subscribing to topic: `%s`", subscribe_topic_command);
+        	iotc_subscribe(in_context_handle, subscribe_topic_command, IOTC_MQTT_QOS_AT_LEAST_ONCE, &iotc_mqttlogic_subscribe_callback, NULL);
+
 //        asprintf(&subscribe_topic_config, SUBSCRIBE_TOPIC_CONFIG, CONFIG_GIOT_DEVICE_ID);
 //        ESP_LOGI(TAG, "subscribe to topic: \"%s\"\n", subscribe_topic_config);
 //        iotc_subscribe(in_context_handle, subscribe_topic_config, IOTC_MQTT_QOS_AT_LEAST_ONCE,
 //                       &iotc_mqttlogic_subscribe_callback, NULL);
 			
 			/* Create a timed task to publish every 10 seconds. */
-			delayed_publish_task = iotc_schedule_timed_task(in_context_handle, publish_telemetry_event, 1, 1, NULL);
+			delayed_publish_task = iotc_schedule_timed_task(in_context_handle, publish_telemetry_event, 1, 10, NULL);
 			break;
 			
 			/* IOTC_CONNECTION_STATE_OPEN_FAILED is set when there was a problem
