@@ -2,6 +2,10 @@
 //TODO: get the url for the last version available
 //TODO: update itself
 
+//DONE: use mac address as device id
+
+//TODO: use state topic for logging
+
 //TODO: CREATE a python script to control official public versions:
 // 1 - check last version on configuration file and up it accordingly: major, minor, patch (could be 3 separated variables)
 // 2 - build and copy the bin file to a safe place with version on the filename
@@ -10,6 +14,7 @@
 //TODO: recreate jwt token on disconnection
 //TODO: force an update to a specific version with command
 //TODO: create configuration of update limits?
+//TODO: create a way for each device to use unique certificates to connect to iotc
 
 
 #include <stdlib.h>
@@ -30,14 +35,14 @@
 #include <iotc.h>
 #include <iotc_jwt.h>
 
-#define VERSION "0.1.0"
+#define APP_VERSION_MAJOR 0
+#define APP_VERSION_MINOR 1
+#define APP_VERSION_PATCH 0
 //static const char *TAG = "TractorApp";
 #define TAG "TractorApp"
 
 #define HX_SCK CONFIG_HX_WRITE
 #define HX_DT CONFIG_HX_READ
-
-
 
 #define IOTC_UNUSED(x) (void)(x)
 #define DEVICE_PATH "projects/%s/locations/%s/registries/%s/devices/%s"
@@ -49,7 +54,7 @@
 #define COMMAND_UPDATE_NOW 777
 
 extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
-char *subscribe_topic_command, *subscribe_topic_config;
+char *DEVICE_ID, *subscribe_topic_command, *subscribe_topic_config;
 iotc_mqtt_qos_t iotc_example_qos = IOTC_MQTT_QOS_AT_LEAST_ONCE;
 static iotc_timed_task_handle_t delayed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
 iotc_context_handle_t iotc_context = IOTC_INVALID_CONTEXT_HANDLE;
@@ -166,9 +171,8 @@ long hx_read(unsigned char samples) {
 void publish_telemetry_event(iotc_context_handle_t context_handle, iotc_timed_task_handle_t timed_task, void *user_data) {
 	IOTC_UNUSED(timed_task);
 	IOTC_UNUSED(user_data);
-	char *publish_topic = NULL;
-	asprintf(&publish_topic, PUBLISH_TOPIC_EVENT, CONFIG_GIOT_DEVICE_ID);
-	char *publish_message = NULL;
+	char *publish_topic, *publish_message;
+	asprintf(&publish_topic, PUBLISH_TOPIC_EVENT, DEVICE_ID);
 	asprintf(&publish_message, "{\"m\":%ld}", hx_read(5));
 	ESP_LOGI(TAG, "publishing msg `%s` to topic: `%s`", publish_message, publish_topic);
 	
@@ -227,7 +231,7 @@ void on_connection_state_changed(iotc_context_handle_t in_context_handle, void *
 			
 			// subscribe to command topic
 			// for now we use this for commanding an update
-	        asprintf(&subscribe_topic_command, SUBSCRIBE_TOPIC_COMMAND, CONFIG_GIOT_DEVICE_ID);
+	        asprintf(&subscribe_topic_command, SUBSCRIBE_TOPIC_COMMAND, DEVICE_ID);
     	    ESP_LOGI(TAG, "subscribing to topic: `%s`", subscribe_topic_command);
         	iotc_subscribe(in_context_handle, subscribe_topic_command, IOTC_MQTT_QOS_AT_LEAST_ONCE, &iotc_mqttlogic_subscribe_callback, NULL);
 
@@ -346,7 +350,7 @@ static void mqtt_task(void *pvParameters) {
 	}
 	
 	char *device_path = NULL;
-	asprintf(&device_path, DEVICE_PATH, CONFIG_GIOT_PROJECT_ID, CONFIG_GIOT_LOCATION, CONFIG_GIOT_REGISTRY_ID, CONFIG_GIOT_DEVICE_ID);
+	asprintf(&device_path, DEVICE_PATH, CONFIG_GIOT_PROJECT_ID, CONFIG_GIOT_LOCATION, CONFIG_GIOT_REGISTRY_ID, DEVICE_ID);
 	iotc_connect(iotc_context, NULL, jwt, device_path, connection_timeout, keepalive_timeout, &on_connection_state_changed);
 	free(device_path);
 	/* The IoTC Client was designed to be able to run on single threaded devices.
@@ -369,6 +373,12 @@ void app_main() {
 	gpio_set_direction(HX_SCK, GPIO_MODE_OUTPUT);
 	gpio_pad_select_gpio(HX_DT);
 	gpio_set_direction(HX_DT, GPIO_MODE_INPUT);
+	
+	
+	unsigned char MAC[6];
+	esp_efuse_mac_get_default(MAC);
+	asprintf(&DEVICE_ID, "%02x%02x%02x%02x%02x%02x", MAC[0], MAC[1], MAC[2], MAC[3], MAC[4], MAC[5]);
+//	ESP_LOGI(TAG, "Hi! My unique id is %s", DEVICE_ID);
 	
 	nvs_init();
 	wifi_station_init();
