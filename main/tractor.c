@@ -1,11 +1,15 @@
-//TODO: receive a command from iotc via mqtt and print it
-//TODO: execute the command to update itself to last version
-//TODO: get last version available - cloud function that returns file to use
-//TODO: save self version on the bin (time?)
-//TODO: check self version
-//TODO: compare self and last version
+//DONE: receive a command from iotc via mqtt and print it
+//TODO: get the url for the last version available
+//TODO: update itself
+
+//TODO: CREATE a python script to control official public versions:
+// 1 - check last version on configuration file and up it accordingly: major, minor, patch (could be 3 separated variables)
+// 2 - build and copy the bin file to a safe place with version on the filename
+// 3 - upload the bin file to the cloud storage
 
 //TODO: recreate jwt token on disconnection
+//TODO: force an update to a specific version with command
+//TODO: create configuration of update limits?
 
 
 #include <stdlib.h>
@@ -175,7 +179,6 @@ void publish_telemetry_event(iotc_context_handle_t context_handle, iotc_timed_ta
 
 void iotc_mqttlogic_subscribe_callback(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
 	IOTC_UNUSED(in_context_handle);
-	IOTC_UNUSED(call_type);
 	IOTC_UNUSED(state);
 	IOTC_UNUSED(user_data);
 	
@@ -234,7 +237,7 @@ void on_connection_state_changed(iotc_context_handle_t in_context_handle, void *
 //                       &iotc_mqttlogic_subscribe_callback, NULL);
 			
 			/* Create a timed task to publish every 10 seconds. */
-			delayed_publish_task = iotc_schedule_timed_task(in_context_handle, publish_telemetry_event, 1, 10, NULL);
+			delayed_publish_task = iotc_schedule_timed_task(in_context_handle, publish_telemetry_event, 10, 1, NULL);
 			break;
 			
 			/* IOTC_CONNECTION_STATE_OPEN_FAILED is set when there was a problem
@@ -250,6 +253,11 @@ void on_connection_state_changed(iotc_context_handle_t in_context_handle, void *
 			
 			/* exit it out of the application by stopping the event loop. */
 			iotc_events_stop();
+			
+			// wait 10 seconds and restart everything
+			vTaskDelay(10000 / portTICK_PERIOD_MS);
+			esp_restart();
+			
 			break;
 			
 			/* IOTC_CONNECTION_STATE_CLOSED is set when the IoTC Client has been
