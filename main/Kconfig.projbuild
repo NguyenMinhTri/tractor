@@ -24,16 +24,22 @@ menu "App Tractor Config"
         help
         WiFi password (WPA or WPA2) for the example to use.
 
-    config HX_WRITE
+    config HX_WRITE_GPIO_PIN
         int "Pin to HX711"
         default 32
         help
         Pin to write to HX711.
 
-    config HX_READ
+    config HX_READ_GPIO_PIN
         int "Pin from HX711"
         default 33
         help
         Pin to read from HX711.
+
+    config DIAGNOSTIC_GPIO_PIN
+        int "Diagnostics pin"
+        default 35
+        help
+        Pin for the system diagnostics. Keep this pin free.
 
 endmenu

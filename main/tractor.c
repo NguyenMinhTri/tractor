@@ -1,22 +1,16 @@
 //DONE: receive a command from iotc via mqtt and print it
 //DONE: use mac address as device id
-//TODO: recreate jwt token on disconnection
+//DONE: download something from google cloud storage using https
+//DONE: update with a fixed url
+//DONE: pass the url as command to update file
 
-//TODO: get the url for the last version available
-//TODO: update itself
-
-
+//TODO: update itself frequently
 //TODO: use state topic for logging
 
 //TODO: CREATE a python script to control official public versions:
 // 1 - check last version on configuration file and up it accordingly: major, minor, patch (could be 3 separated variables)
 // 2 - build and copy the bin file to a safe place with version on the filename
 // 3 - upload the bin file to the cloud storage
-
-//TODO: force an update to a specific version with command
-//TODO: create configuration of update limits?
-//TODO: create a way for each device to use unique certificates to connect to iotc
-
 
 #include <stdlib.h>
 #include <time.h>
@@ -32,36 +26,21 @@
 #include "jsmn.h"
 #include "lwip/apps/sntp.h"
 #include "driver/gpio.h"
-
 #include <iotc.h>
 #include <iotc_jwt.h>
-
+#include <esp_http_client.h>
+#include <esp_ota_ops.h>
 
 #define TAG "TractorApp"
 #define APP_VERSION_MAJOR CONFIG_APP_VERSION_MAJOR
 #define APP_VERSION_MINOR CONFIG_APP_VERSION_MINOR
 #define APP_VERSION_PATCH CONFIG_APP_VERSION_PATCH
 
+//hx711
+#define HX_SCK CONFIG_HX_WRITE_GPIO_PIN
+#define HX_DT CONFIG_HX_READ_GPIO_PIN
 
-#define HX_SCK CONFIG_HX_WRITE
-#define HX_DT CONFIG_HX_READ
-
-#define IOTC_UNUSED(x) (void)(x)
-#define DEVICE_PATH "projects/%s/locations/%s/registries/%s/devices/%s"
-#define PUBLISH_TOPIC_EVENT "/devices/%s/events"
-//#define PUBLISH_TOPIC_STATE "/devices/%s/state"
-#define SUBSCRIBE_TOPIC_COMMAND "/devices/%s/commands/#"
-//#define SUBSCRIBE_TOPIC_CONFIG "/devices/%s/config"
-
-#define COMMAND_UPDATE_NOW 777
-
-extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
-char *DEVICE_ID, *subscribe_topic_command, *subscribe_topic_config;
-iotc_mqtt_qos_t iotc_example_qos = IOTC_MQTT_QOS_AT_LEAST_ONCE;
-static iotc_timed_task_handle_t delayed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
-iotc_context_handle_t iotc_context = IOTC_INVALID_CONTEXT_HANDLE;
-
-
+//wifi
 #define WIFI_SSID CONFIG_ESP_WIFI_SSID
 #define WIFI_PASS CONFIG_ESP_WIFI_PASSWORD
 #define WIFI_RETRIES 5
@@ -69,6 +48,47 @@ static EventGroupHandle_t s_wifi_event_group;
 const int WIFI_CONNECTED_BIT = BIT0;
 static int s_retry_num = 0;
 
+//iotc
+#define IOTC_UNUSED(x) (void)(x)
+#define DEVICE_PATH "projects/%s/locations/%s/registries/%s/devices/%s"
+#define PUBLISH_TOPIC_EVENT "/devices/%s/events"
+//#define PUBLISH_TOPIC_STATE "/devices/%s/state"
+#define SUBSCRIBE_TOPIC_COMMAND "/devices/%s/commands/#"
+//#define SUBSCRIBE_TOPIC_CONFIG "/devices/%s/config"
+static char *DEVICE_ID, *subscribe_topic_command, *subscribe_topic_config;
+static iotc_mqtt_qos_t iotc_example_qos = IOTC_MQTT_QOS_AT_LEAST_ONCE;
+static iotc_timed_task_handle_t delayed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
+static iotc_context_handle_t iotc_context = IOTC_INVALID_CONTEXT_HANDLE;
+
+//remote commands
+#define COMMAND_UPDATE_NOW 777
+
+//ota
+#define BUFFSIZE 1024
+#define HASH_LEN 32
+//#define OTA_URL_SIZE 256
+#define DIAGNOSTIC_PIN CONFIG_DIAGNOSTIC_GPIO_PIN
+//#define OTA_CHECK_VERSION_ALREADY_LOADED CONFIG_OTA_CHECK_VERSION_ALREADY_LOADED
+char *ota_buffer[BUFFSIZE+1];
+char *ota_url;
+
+//certs
+extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
+extern const uint8_t google_root_ca_pem_start[] asm("_binary_google_roots_pem_start");
+
+
+static void app_device_init(void) {
+	unsigned char MAC[6];
+	esp_efuse_mac_get_default(MAC);
+	asprintf(&DEVICE_ID, "%02x%02x%02x%02x%02x%02x", MAC[0], MAC[1], MAC[2], MAC[3], MAC[4], MAC[5]);
+	ESP_LOGI(TAG, "DEVICE ID: %s", DEVICE_ID);
+	ESP_LOGI(TAG, "APP VERSION: %d.%d.%d", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
+	
+	gpio_pad_select_gpio(HX_SCK);
+	gpio_set_direction(HX_SCK, GPIO_MODE_OUTPUT);
+	gpio_pad_select_gpio(HX_DT);
+	gpio_set_direction(HX_DT, GPIO_MODE_INPUT);
+}
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
 	if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
@@ -90,7 +110,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t e
 	}
 }
 
-void wifi_station_init(void) {
+static void wifi_station_init(void) {
 	s_wifi_event_group = xEventGroupCreate();
 	ESP_ERROR_CHECK(esp_netif_init());
 	ESP_ERROR_CHECK(esp_event_loop_create_default());
@@ -105,13 +125,26 @@ void wifi_station_init(void) {
 	ESP_ERROR_CHECK(esp_wifi_start());
 }
 
-
 static void time_init(void) {
 	ESP_LOGI(TAG, "Initializing SNTP");
 	sntp_setoperatingmode(SNTP_OPMODE_POLL);
-	sntp_setservername(0, "time.google.com");
-	sntp_setservername(0, "time.apple.com");
+	sntp_setservername(0, "pool.ntp.org");
+	sntp_setservername(1, "time.google.com");
+	sntp_setservername(2, "time.apple.com");
 	sntp_init();
+	
+	time_t now = 0;
+	struct tm timeinfo = {0};
+	while (timeinfo.tm_year < (2020-1900)) {
+		ESP_LOGI(TAG, "setting system time...");
+		vTaskDelay(5000 / portTICK_PERIOD_MS);
+		time(&now);
+		localtime_r(&now, &timeinfo);
+	}
+	
+	char buffer[26];
+	strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", &timeinfo);
+	ESP_LOGI(TAG, "system time is %s UTC", buffer);
 }
 
 static void nvs_init(void) {
@@ -123,30 +156,7 @@ static void nvs_init(void) {
 	ESP_ERROR_CHECK(ret);
 }
 
-static void hx711_init(void) {
-	gpio_pad_select_gpio(HX_SCK);
-	gpio_set_direction(HX_SCK, GPIO_MODE_OUTPUT);
-	gpio_pad_select_gpio(HX_DT);
-	gpio_set_direction(HX_DT, GPIO_MODE_INPUT);
-}
-
-static void update_time(void) {
-	time_t now = 0;
-	struct tm timeinfo = {0};
-	while (timeinfo.tm_year < (2016 - 1900)) {
-		ESP_LOGI(TAG, "waiting for system time to be set");
-		vTaskDelay(5000 / portTICK_PERIOD_MS);
-		time(&now);
-		localtime_r(&now, &timeinfo);
-	}
-	
-	char buffer[26];
-	strftime(buffer, 26, "%Y-%m-%dT%H:%M:%S", &timeinfo);
-	ESP_LOGI(TAG, "system time is %s UTC", buffer);
-}
-
-
-long hx_read(unsigned char samples) {
+static long hx_read(unsigned char samples) {
 	long result = 0;
 	const unsigned char gain = 1;
 	for (unsigned char s = 0; s < samples; s++) {
@@ -165,6 +175,104 @@ long hx_read(unsigned char samples) {
 	}
 	gpio_set_level(HX_SCK, 1); //hx sleep
 	return result;
+}
+
+static void ota_update_task(void *pvParameters) {
+	ESP_LOGI(TAG, "starting OTA");
+	
+	esp_err_t err;
+	
+	const esp_partition_t *boot_partition = esp_ota_get_boot_partition();
+	const esp_partition_t *running_partition = esp_ota_get_running_partition();
+	const esp_partition_t *update_partition = esp_ota_get_next_update_partition(running_partition);
+	
+	ESP_LOGI(TAG, "Boot partition type %d subtype %d offset 0x%08x", boot_partition->type, boot_partition->subtype, boot_partition->address);
+	ESP_LOGI(TAG, "Running partition type %d subtype %d offset 0x%08x", running_partition->type, running_partition->subtype, running_partition->address);
+	ESP_LOGI(TAG, "Update partition type %d subtype %d offset 0x%08x", update_partition->type, update_partition->subtype, update_partition->address);
+	
+	if (update_partition == NULL) {
+		ESP_LOGE(TAG, "null update partition, terminating update");
+		vTaskDelete(NULL);
+	}
+	
+	esp_http_client_config_t http_config = {
+			.url = ota_url,
+			.cert_pem = (char *) google_root_ca_pem_start,
+//			.event_handler = http_event_handler,
+	};
+	
+	esp_http_client_handle_t http_client = esp_http_client_init(&http_config);
+	if (http_client == NULL) {
+		ESP_LOGE(TAG, "failed to initialise http connection");
+		vTaskDelete(NULL);
+	}
+	
+	err = esp_http_client_open(http_client, 0);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "failed to open HTTP connection: %s %d", esp_err_to_name(err), err);
+		vTaskDelete(NULL);
+	}
+	int headers_count = esp_http_client_fetch_headers(http_client);
+	ESP_LOGE(TAG, "headers %d", headers_count);
+	
+	//init ota writer
+	esp_ota_handle_t ota_handle;
+	err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "esp_ota_begin failed (%s) %d", esp_err_to_name(err), err);
+		vTaskDelete(NULL);
+	}
+	ESP_LOGI(TAG, "esp_ota_begin succeeded");
+	
+	
+	int binary_file_length = 0;
+	while (1) {
+		int data_read = esp_http_client_read(http_client, (char *) ota_buffer, BUFFSIZE);
+//		ESP_LOGI(TAG, "readed %d", data_read);
+		
+		if (data_read < 0) {
+			ESP_LOGE(TAG, "ssl data read error");
+			vTaskDelete(NULL);
+		}
+		
+		else if (data_read > 0) {
+			err = esp_ota_write(ota_handle, ota_buffer, data_read);
+			if (err != ESP_OK) {
+				ESP_LOGE(TAG, "error writing to ota partition %s %d", esp_err_to_name(err), err);
+				vTaskDelete(NULL);
+			}
+			binary_file_length += data_read;
+			ESP_LOGI(TAG, "written image length %d", binary_file_length);
+		}
+		
+		else if (data_read == 0) {
+			if (esp_http_client_is_complete_data_received(http_client) == true) {
+				break;
+			}
+		}
+	}
+	
+	ESP_LOGI(TAG, "total write binary data length: %d", binary_file_length);
+	
+	if (esp_http_client_is_complete_data_received(http_client) != true) {
+		ESP_LOGE(TAG, "error in receiving complete file");
+		vTaskDelete(NULL);
+	}
+	
+	err = esp_ota_end(ota_handle);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "esp_ota_end failed %s %d!", esp_err_to_name(err), err);
+		vTaskDelete(NULL);
+	}
+	
+	err = esp_ota_set_boot_partition(update_partition);
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "esp_ota_set_boot_partition failed %s %d", esp_err_to_name(err), err);
+		vTaskDelete(NULL);
+	}
+	
+	ESP_LOGI(TAG, "ota successfull rebooting");
+	esp_restart();
 }
 
 void iotc_mqtt_publish_message(iotc_context_handle_t context_handle, iotc_timed_task_handle_t timed_task, void *user_data) {
@@ -186,8 +294,7 @@ void iotc_mqtt_publish_message(iotc_context_handle_t context_handle, iotc_timed_
 	
 }
 
-void
-iotc_mqtt_subscription_event_handler(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
+void iotc_mqtt_subscription_event_handler(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
 	IOTC_UNUSED(in_context_handle);
 	IOTC_UNUSED(state);
 	IOTC_UNUSED(user_data);
@@ -210,21 +317,14 @@ iotc_mqtt_subscription_event_handler(iotc_context_handle_t in_context_handle, io
 		}
 		memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
 		sub_message[params->message.temporary_payload_data_length] = '\0';
-//		ESP_LOGI(TAG, "payload received: `%s`", sub_message);
 		
-		int command = 0;
-		sscanf(sub_message, "%d", &command);
-		
-		if (command == COMMAND_UPDATE_NOW) {
-			ESP_LOGI(TAG, "command acknowledged: will update now");
-		} else {
-			ESP_LOGI(TAG, "command not acknowledged: %d", command);
-		}
+		sscanf(sub_message, "%s", ota_url);
+		ESP_LOGI(TAG, "command acknowledged: will update now with file %s", ota_url);
+		xTaskCreate(&ota_update_task, "simple_ota_task", 1024 * 8, NULL, 5, NULL);
 		
 		free(sub_message);
 	}
 }
-
 
 void iotc_mqtt_connection_event_handler(iotc_context_handle_t in_context_handle, void *data, iotc_state_t state) {
 	iotc_connection_data_t *conn_data = (iotc_connection_data_t *) data;
@@ -296,7 +396,6 @@ void iotc_mqtt_connection_event_handler(iotc_context_handle_t in_context_handle,
 	}
 }
 
-
 static void iotc_mqtt_connection_task(void *pvParameters) {
 	/* Format the key type descriptors so the client understands
 	 which type of key is being represented. In this case, a PEM encoded
@@ -311,7 +410,7 @@ static void iotc_mqtt_connection_task(void *pvParameters) {
 	const iotc_state_t error_init = iotc_initialize();
 	
 	if (IOTC_STATE_OK != error_init) {
-		ESP_LOGI(TAG, "iotc failed to initialize, error: %d\n", error_init);
+		ESP_LOGI(TAG, "iotc failed to initialize, error: %d", error_init);
 		vTaskDelete(NULL);
 	}
 	
@@ -320,7 +419,7 @@ static void iotc_mqtt_connection_task(void *pvParameters) {
 		to numerous topics. */
 	iotc_context = iotc_create_context();
 	if (IOTC_INVALID_CONTEXT_HANDLE >= iotc_context) {
-		ESP_LOGI(TAG, "iotc failed to create context, error: %d\n", -iotc_context);
+		ESP_LOGI(TAG, "iotc failed to create context, error: %d", -iotc_context);
 		vTaskDelete(NULL);
 	}
 	
@@ -369,23 +468,153 @@ static void iotc_mqtt_connection_task(void *pvParameters) {
 	vTaskDelete(NULL);
 }
 
-static void app_device_init(void) {
-	unsigned char MAC[6];
-	esp_efuse_mac_get_default(MAC);
-	asprintf(&DEVICE_ID, "%02x%02x%02x%02x%02x%02x", MAC[0], MAC[1], MAC[2], MAC[3], MAC[4], MAC[5]);
-	ESP_LOGI(TAG, "DEVICE ID: %s", DEVICE_ID);
-	ESP_LOGI(TAG, "APP VERSION: %d.%d.%d", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
+static void print_sha256 (const uint8_t *image_hash, const char *label) {
+	char hash_print[HASH_LEN * 2 + 1];
+	hash_print[HASH_LEN * 2] = 0;
+	for (int i = 0; i < HASH_LEN; ++i) {
+		sprintf(&hash_print[i * 2], "%02x", image_hash[i]);
+	}
+	ESP_LOGI(TAG, "%s: %s", label, hash_print);
+}
+
+static bool diagnostic(void) {
+	gpio_config_t io_conf;
+	io_conf.intr_type    = (gpio_int_type_t) GPIO_PIN_INTR_DISABLE;
+	io_conf.mode         = GPIO_MODE_INPUT;
+	io_conf.pin_bit_mask = (1ULL << DIAGNOSTIC_PIN);
+	io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+	io_conf.pull_up_en   = GPIO_PULLUP_ENABLE;
+	gpio_config(&io_conf);
+	
+	ESP_LOGI(TAG, "Diagnostics (5 sec)...");
+	vTaskDelay(5000 / portTICK_PERIOD_MS);
+	
+	bool diagnostic_is_ok = gpio_get_level(DIAGNOSTIC_PIN);
+	
+	gpio_reset_pin(DIAGNOSTIC_PIN);
+	return diagnostic_is_ok;
+}
+
+static void check_partition(void) {
+	uint8_t sha_256[HASH_LEN] = { 0 };
+	esp_partition_t partition;
+	
+	// get sha256 digest for the partition table
+	partition.address   = ESP_PARTITION_TABLE_OFFSET;
+	partition.size      = ESP_PARTITION_TABLE_MAX_LEN;
+	partition.type      = ESP_PARTITION_TYPE_DATA;
+	esp_partition_get_sha256(&partition, sha_256);
+	print_sha256(sha_256, "SHA-256 for the partition table: ");
+	
+	// get sha256 digest for bootloader
+	partition.address   = ESP_BOOTLOADER_OFFSET;
+	partition.size      = ESP_PARTITION_TABLE_OFFSET;
+	partition.type      = ESP_PARTITION_TYPE_APP;
+	esp_partition_get_sha256(&partition, sha_256);
+	print_sha256(sha_256, "SHA-256 for bootloader: ");
+	
+	// get sha256 digest for running partition
+	esp_partition_get_sha256(esp_ota_get_running_partition(), sha_256);
+	print_sha256(sha_256, "SHA-256 for current firmware: ");
+	
+	const esp_partition_t *running = esp_ota_get_running_partition();
+	esp_ota_img_states_t ota_state;
+	if (esp_ota_get_state_partition(running, &ota_state) == ESP_OK) {
+		if (ota_state == ESP_OTA_IMG_PENDING_VERIFY) {
+			// run diagnostic function ...
+			bool diagnostic_is_ok = diagnostic();
+			if (diagnostic_is_ok) {
+				ESP_LOGI(TAG, "Diagnostics completed successfully! Continuing execution ...");
+				esp_ota_mark_app_valid_cancel_rollback();
+			} else {
+				ESP_LOGE(TAG, "Diagnostics failed! Start rollback to the previous version ...");
+				esp_ota_mark_app_invalid_rollback_and_reboot();
+			}
+		}
+	}
+}
+
+static void enforcements(void) {
+	// possible corruptions in boot
+	const esp_partition_t *running = esp_ota_get_running_partition();
+	esp_ota_set_boot_partition(running);
+}
+
+static void connection_test_task(void *pvParameters){
+	esp_http_client_config_t http_config = {
+			.url = "https://storage.googleapis.com/heartflow-bin/espressif-devkitc-v4/file.txt",
+			.cert_pem = (char *) google_root_ca_pem_start,
+//			.timeout_ms = 30000,
+//			.method = HTTP_METHOD_GET,
+//			.disable_auto_redirect = false,
+//			.buffer_size = 1024,
+//			.is_async = true,
+//			.event_handler = http_event_handler,
+//			.max_redirection_count = 30,
+	};
+
+	esp_http_client_handle_t http_client = esp_http_client_init(&http_config);
+	if (http_client == NULL) {
+		ESP_LOGE(TAG, "failed to initialise http connection");
+		vTaskDelete(NULL);
+	}
+
+	esp_err_t err;
+
+	while (1) {
+		err = esp_http_client_open(http_client, 0);
+		if (err != ESP_OK) {
+			ESP_LOGE(TAG, "failed to open HTTP connection: %s %d", esp_err_to_name(err), err);
+			vTaskDelete(NULL);
+		}
+
+		int content_length = esp_http_client_fetch_headers(http_client);
+		ESP_LOGI(TAG, "headers content-length %d", content_length);
+
+		int status_code = esp_http_client_get_status_code(http_client);
+		ESP_LOGI(TAG, "status code %d", status_code);
+
+		if (status_code >= 300 && status_code < 310){
+			esp_http_client_set_redirection(http_client);
+		} else {
+			break;
+		}
+	}
+
+	char buffer[1024];
+	int total_len = 0;
+	while (1) {
+		int data_len = esp_http_client_read(http_client, buffer, 1024);
+		ESP_LOGI(TAG, "len %d", data_len);
+
+		if (data_len <= 0) {
+			break;
+		}
+		else if(data_len > 0){
+			ESP_LOGI("XDATA", "%.*s", data_len, buffer);
+			total_len += data_len;
+		}
+	}
+
+	ESP_LOGI(TAG, "total %d", total_len);
+
+	err = esp_http_client_is_complete_data_received(http_client);
+	ESP_LOGI(TAG, "complete %d", err);
+
+	err = esp_http_client_cleanup(http_client);
+	ESP_LOGI(TAG, "cleaning %d", err);
+
+	vTaskDelete(NULL);
 }
 
 void app_main() {
+	enforcements();
+	check_partition();
 	
 	app_device_init();
-	
 	nvs_init();
 	wifi_station_init();
 	time_init();
-	update_time();
-	hx711_init();
 	
-	xTaskCreate(&iotc_mqtt_connection_task, "iotc_mqtt_task", 6144, NULL, 5, NULL);
+	xTaskCreate(&iotc_mqtt_connection_task, "iotc_mqtt_task", 1024*6, NULL, 5, NULL);
 }
