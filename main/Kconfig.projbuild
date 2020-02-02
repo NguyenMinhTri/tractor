@@ -1,27 +1,45 @@
-menu "Application Tractor Config"
+menu "App Tractor Config"
 
-config ESP_WIFI_SSID
-    string "WiFi SSID"
-    default "myssid"
-    help
-	SSID (network name) for the example to connect to.
+    config APP_VERSION_MAJOR
+        int "App Version Major"
+        default 0
 
-config ESP_WIFI_PASSWORD
-    string "WiFi Password"
-    default "mypassword"
-    help
-	WiFi password (WPA or WPA2) for the example to use.
+    config APP_VERSION_MINOR
+        int "App Version Minor"
+        default 0
 
-config HX_WRITE
-    int "Pin to HX711"
-    default 32
-    help
-    Pin to write to HX711.
+    config APP_VERSION_PATCH
+        int "App Version Patch"
+        default 0
 
-config HX_READ
-    int "Pin from HX711"
-    default 33
-    help
-    Pin to read from HX711.
+    config ESP_WIFI_SSID
+        string "WiFi SSID"
+        default "myssid"
+        help
+        SSID (network name) for the example to connect to.
+
+    config ESP_WIFI_PASSWORD
+        string "WiFi Password"
+        default "mypassword"
+        help
+        WiFi password (WPA or WPA2) for the example to use.
+
+    config HX_WRITE_GPIO_PIN
+        int "Pin to HX711"
+        default 32
+        help
+        Pin to write to HX711.
+
+    config HX_READ_GPIO_PIN
+        int "Pin from HX711"
+        default 33
+        help
+        Pin to read from HX711.
+
+    config DIAGNOSTIC_GPIO_PIN
+        int "Diagnostics pin"
+        default 35
+        help
+        Pin for the system diagnostics. Keep this pin free.
 
 endmenu
