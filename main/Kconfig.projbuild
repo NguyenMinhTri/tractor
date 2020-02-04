@@ -1,17 +1,5 @@
 menu "App Tractor Config"
 
-    config APP_VERSION_MAJOR
-        int "App Version Major"
-        default 0
-
-    config APP_VERSION_MINOR
-        int "App Version Minor"
-        default 0
-
-    config APP_VERSION_PATCH
-        int "App Version Patch"
-        default 0
-
     config ESP_WIFI_SSID
         string "WiFi SSID"
         default "myssid"

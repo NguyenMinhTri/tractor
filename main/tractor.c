@@ -32,9 +32,7 @@
 #include <esp_ota_ops.h>
 
 #define TAG "TractorApp"
-#define APP_VERSION_MAJOR CONFIG_APP_VERSION_MAJOR
-#define APP_VERSION_MINOR CONFIG_APP_VERSION_MINOR
-#define APP_VERSION_PATCH CONFIG_APP_VERSION_PATCH
+static const esp_app_desc_t *APP_DESC;
 
 //hx711
 #define HX_SCK CONFIG_HX_WRITE_GPIO_PIN
@@ -82,7 +80,9 @@ static void app_device_init(void) {
 	esp_efuse_mac_get_default(MAC);
 	asprintf(&DEVICE_ID, "%02x%02x%02x%02x%02x%02x", MAC[0], MAC[1], MAC[2], MAC[3], MAC[4], MAC[5]);
 	ESP_LOGI(TAG, "DEVICE ID: %s", DEVICE_ID);
-	ESP_LOGI(TAG, "APP VERSION: %d.%d.%d", APP_VERSION_MAJOR, APP_VERSION_MINOR, APP_VERSION_PATCH);
+	
+	APP_DESC = esp_ota_get_app_description();
+	ESP_LOGI(TAG, "APP VERSION: %s", APP_DESC->version);
 	
 	gpio_pad_select_gpio(HX_SCK);
 	gpio_set_direction(HX_SCK, GPIO_MODE_OUTPUT);
