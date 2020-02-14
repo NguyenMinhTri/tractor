@@ -283,7 +283,7 @@ void iotc_mqtt_publish_message(iotc_context_handle_t context_handle, iotc_timed_
 	IOTC_UNUSED(user_data);
 	char *publish_topic, *publish_message;
 	asprintf(&publish_topic, PUBLISH_TOPIC_EVENT, DEVICE_ID);
-	asprintf(&publish_message, "{\"m\":%ld}", hx_read(5));
+	asprintf(&publish_message, "{\"k\":\"%s\",\"v\":%ld}", "loadcell", hx_read(5));
 	ESP_LOGI(TAG, "publishing msg `%s` to topic: `%s`", publish_message, publish_topic);
 	
 	iotc_publish(context_handle, publish_topic, publish_message, iotc_example_qos, /*callback=*/NULL, /*user_data=*/NULL);
