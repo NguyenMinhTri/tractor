@@ -270,6 +270,9 @@ static void ota_update_task(void *pvParameters) {
 		ESP_LOGE(TAG, "esp_ota_set_boot_partition failed %s %d", esp_err_to_name(err), err);
 		vTaskDelete(NULL);
 	}
+
+	// erase nvs to force recalibration of wifi with the new version on restart
+	nvs_flash_erase();
 	
 	ESP_LOGI(TAG, "ota successfull rebooting");
 	esp_restart();
@@ -310,19 +313,22 @@ void iotc_mqtt_subscription_event_handler(iotc_context_handle_t in_context_handl
 	}
 	
 	if (call_type == IOTC_SUB_CALL_MESSAGE) {
-		char *sub_message = (char *) malloc(params->message.temporary_payload_data_length + 1);
-		if (sub_message == NULL) {
-			ESP_LOGE(TAG, "failed to allocate memory to receive message from topic `%s`", params->message.topic);
-			return;
-		}
-		memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
-		sub_message[params->message.temporary_payload_data_length] = '\0';
+//		char *sub_message = (char *) malloc(params->message.temporary_payload_data_length + 1);
+//		if (sub_message == NULL) {
+//			ESP_LOGE(TAG, "failed to allocate memory to receive message from topic `%s`", params->message.topic);
+//			return;
+//		}
+//		memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
+//		sub_message[params->message.temporary_payload_data_length] = '\0';
 		
-		sscanf(sub_message, "%s", ota_url);
+		ota_url = (char *) malloc(params->message.temporary_payload_data_length + 1);
+		memcpy(ota_url, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
+		ota_url[params->message.temporary_payload_data_length] = '\0';
+		
 		ESP_LOGI(TAG, "command acknowledged: will update now with file %s", ota_url);
 		xTaskCreate(&ota_update_task, "simple_ota_task", 1024 * 8, NULL, 5, NULL);
 		
-		free(sub_message);
+//		free(sub_message);
 	}
 }
 
@@ -540,7 +546,7 @@ static void enforcements(void) {
 	esp_ota_set_boot_partition(running);
 }
 
-static void connection_test_task(void *pvParameters){
+static void download_test_task(void *pvParameters){
 	esp_http_client_config_t http_config = {
 			.url = "https://storage.googleapis.com/heartflow-bin/espressif-devkitc-v4/file.txt",
 			.cert_pem = (char *) google_root_ca_pem_start,
