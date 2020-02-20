@@ -1,35 +1,22 @@
-//DONE: receive a command from iotc via mqtt and print it
-//DONE: use mac address as device id
-//DONE: download something from google cloud storage using https
-//DONE: update with a fixed url
-//DONE: pass the url as command to update file
-
-//TODO: update itself frequently
-//TODO: use state topic for logging
-
-//TODO: CREATE a python script to control official public versions:
-// 1 - check last version on configuration file and up it accordingly: major, minor, patch (could be 3 separated variables)
-// 2 - build and copy the bin file to a safe place with version on the filename
-// 3 - upload the bin file to the cloud storage
-
 #include <stdlib.h>
 #include <time.h>
 #include <string.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "freertos/event_groups.h"
-#include "esp_system.h"
-#include "esp_wifi.h"
-#include "esp_event.h"
-#include "esp_log.h"
-#include "nvs_flash.h"
-#include "jsmn.h"
-#include "lwip/apps/sntp.h"
-#include "driver/gpio.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+#include <freertos/event_groups.h>
+#include <esp_system.h>
+#include <esp_wifi.h>
+#include <esp_event.h>
+#include <esp_log.h>
+#include <nvs_flash.h>
+#include <jsmn.h>
+#include <lwip/apps/sntp.h>
+#include <driver/gpio.h>
 #include <iotc.h>
 #include <iotc_jwt.h>
 #include <esp_http_client.h>
 #include <esp_ota_ops.h>
+#include <esp_phy_init.h>
 
 #define TAG "TractorApp"
 static const esp_app_desc_t *APP_DESC;
@@ -265,14 +252,18 @@ static void ota_update_task(void *pvParameters) {
 		vTaskDelete(NULL);
 	}
 	
+	// erase wifi nvs data calibration (phy) to force recalibration of wifi with the new version on restart
+	err = esp_phy_erase_cal_data_in_nvs();
+	if (err != ESP_OK) {
+		ESP_LOGE(TAG, "error erasing phy nvs: %s %d", esp_err_to_name(err), err);
+	}
+	
 	err = esp_ota_set_boot_partition(update_partition);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "esp_ota_set_boot_partition failed %s %d", esp_err_to_name(err), err);
 		vTaskDelete(NULL);
 	}
 
-	// erase nvs to force recalibration of wifi with the new version on restart
-	nvs_flash_erase();
 	
 	ESP_LOGI(TAG, "ota successfull rebooting");
 	esp_restart();
