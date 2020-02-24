@@ -39,10 +39,10 @@ static int s_retry_num = 0;
 #define PUBLISH_TOPIC_EVENT "/devices/%s/events"
 //#define PUBLISH_TOPIC_STATE "/devices/%s/state"
 #define SUBSCRIBE_TOPIC_COMMAND "/devices/%s/commands/#"
-//#define SUBSCRIBE_TOPIC_CONFIG "/devices/%s/config"
+#define SUBSCRIBE_TOPIC_CONFIG "/devices/%s/config"
 static char *DEVICE_ID, *subscribe_topic_command, *subscribe_topic_config;
 static iotc_mqtt_qos_t iotc_example_qos = IOTC_MQTT_QOS_AT_LEAST_ONCE;
-static iotc_timed_task_handle_t delayed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
+static iotc_timed_task_handle_t timed_publish_task = IOTC_INVALID_TIMED_TASK_HANDLE;
 static iotc_context_handle_t iotc_context = IOTC_INVALID_CONTEXT_HANDLE;
 
 //remote commands
@@ -53,13 +53,12 @@ static iotc_context_handle_t iotc_context = IOTC_INVALID_CONTEXT_HANDLE;
 #define HASH_LEN 32
 //#define OTA_URL_SIZE 256
 #define DIAGNOSTIC_PIN CONFIG_DIAGNOSTIC_GPIO_PIN
-//#define OTA_CHECK_VERSION_ALREADY_LOADED CONFIG_OTA_CHECK_VERSION_ALREADY_LOADED
-char *ota_buffer[BUFFSIZE+1];
-char *ota_url;
 
 //certs
 extern const uint8_t ec_pv_key_start[] asm("_binary_private_key_pem_start");
 extern const uint8_t google_root_ca_pem_start[] asm("_binary_google_roots_pem_start");
+
+
 
 
 static void app_device_init(void) {
@@ -164,11 +163,10 @@ static long hx_read(unsigned char samples) {
 	return result;
 }
 
-static void ota_update_task(void *pvParameters) {
+static void ota_update(char *ota_url) {
 	ESP_LOGI(TAG, "starting OTA");
-	
+	char *ota_buffer[BUFFSIZE+1];
 	esp_err_t err;
-	
 	const esp_partition_t *boot_partition = esp_ota_get_boot_partition();
 	const esp_partition_t *running_partition = esp_ota_get_running_partition();
 	const esp_partition_t *update_partition = esp_ota_get_next_update_partition(running_partition);
@@ -179,7 +177,7 @@ static void ota_update_task(void *pvParameters) {
 	
 	if (update_partition == NULL) {
 		ESP_LOGE(TAG, "null update partition, terminating update");
-		vTaskDelete(NULL);
+		return;
 	}
 	
 	esp_http_client_config_t http_config = {
@@ -191,13 +189,13 @@ static void ota_update_task(void *pvParameters) {
 	esp_http_client_handle_t http_client = esp_http_client_init(&http_config);
 	if (http_client == NULL) {
 		ESP_LOGE(TAG, "failed to initialise http connection");
-		vTaskDelete(NULL);
+		return;
 	}
 	
 	err = esp_http_client_open(http_client, 0);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "failed to open HTTP connection: %s %d", esp_err_to_name(err), err);
-		vTaskDelete(NULL);
+		return;
 	}
 	int headers_count = esp_http_client_fetch_headers(http_client);
 	ESP_LOGE(TAG, "headers %d", headers_count);
@@ -207,7 +205,7 @@ static void ota_update_task(void *pvParameters) {
 	err = esp_ota_begin(update_partition, OTA_SIZE_UNKNOWN, &ota_handle);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "esp_ota_begin failed (%s) %d", esp_err_to_name(err), err);
-		vTaskDelete(NULL);
+		return;
 	}
 	ESP_LOGI(TAG, "esp_ota_begin succeeded");
 	
@@ -219,14 +217,14 @@ static void ota_update_task(void *pvParameters) {
 		
 		if (data_read < 0) {
 			ESP_LOGE(TAG, "ssl data read error");
-			vTaskDelete(NULL);
+			return;
 		}
 		
 		else if (data_read > 0) {
 			err = esp_ota_write(ota_handle, ota_buffer, data_read);
 			if (err != ESP_OK) {
 				ESP_LOGE(TAG, "error writing to ota partition %s %d", esp_err_to_name(err), err);
-				vTaskDelete(NULL);
+				return;
 			}
 			binary_file_length += data_read;
 			ESP_LOGI(TAG, "written image length %d", binary_file_length);
@@ -243,13 +241,13 @@ static void ota_update_task(void *pvParameters) {
 	
 	if (esp_http_client_is_complete_data_received(http_client) != true) {
 		ESP_LOGE(TAG, "error in receiving complete file");
-		vTaskDelete(NULL);
+		return;
 	}
 	
 	err = esp_ota_end(ota_handle);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "esp_ota_end failed %s %d!", esp_err_to_name(err), err);
-		vTaskDelete(NULL);
+		return;
 	}
 	
 	// erase wifi nvs data calibration (phy) to force recalibration of wifi with the new version on restart
@@ -261,17 +259,38 @@ static void ota_update_task(void *pvParameters) {
 	err = esp_ota_set_boot_partition(update_partition);
 	if (err != ESP_OK) {
 		ESP_LOGE(TAG, "esp_ota_set_boot_partition failed %s %d", esp_err_to_name(err), err);
-		vTaskDelete(NULL);
+		return;
 	}
-
 	
 	ESP_LOGI(TAG, "ota successfull rebooting");
 	esp_restart();
 }
 
+static void apply_config(char *config) {
+	int i, n;
+	jsmn_parser p;
+	jsmntok_t tokens[12];
+
+	jsmn_init(&p);
+	n = jsmn_parse(&p, config, strlen(config), tokens, 12);
+	if (n < 0) {
+		ESP_LOGE(TAG, "error parsing config");
+		return;
+	}
+	
+	for (i=0; i<=n; i=i+2) {
+		char *k = NULL;
+		char *v = NULL;
+		asprintf(&k, "%.*s", tokens[i].end - tokens[i].start, config + tokens[i].start);
+		asprintf(&v, "%.*s", tokens[i+1].end - tokens[i+1].start, config + tokens[i+1].start);
+
+		ESP_LOGI(TAG, "config %d - %s: %s", i, k, v);
+	}
+	
+}
+
+
 void iotc_mqtt_publish_message(iotc_context_handle_t context_handle, iotc_timed_task_handle_t timed_task, void *user_data) {
-	IOTC_UNUSED(timed_task);
-	IOTC_UNUSED(user_data);
 	char *publish_topic, *publish_message;
 	asprintf(&publish_topic, PUBLISH_TOPIC_EVENT, DEVICE_ID);
 	asprintf(&publish_message, "{\"k\":\"%s\",\"v\":%ld}", "loadcell", hx_read(5));
@@ -285,43 +304,52 @@ void iotc_mqtt_publish_message(iotc_context_handle_t context_handle, iotc_timed_
 //	ESP_LOGI(TAG, "wm: %d", water_mark);
 //
 //	heap_caps_print_heap_info(MALLOC_CAP_8BIT);
-	
 }
 
-void iotc_mqtt_subscription_event_handler(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
-	IOTC_UNUSED(in_context_handle);
-	IOTC_UNUSED(state);
-	IOTC_UNUSED(user_data);
-	
-//	if these are null, nothing will work
+void iotc_mqtt_command_event(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
 	if (params == NULL && params->message.topic == NULL) {
+		ESP_LOGE(TAG, "malformed empty mqtt message received");
 		return;
 	}
 	
 	if (call_type == IOTC_SUB_CALL_SUBACK) {
-		ESP_LOGI(TAG, "mqtt subscribed successfully");
+		ESP_LOGI(TAG, "mqtt subscribed successfully %s", params->message.topic);
 		return;
 	}
 	
-	if (call_type == IOTC_SUB_CALL_MESSAGE) {
-//		char *sub_message = (char *) malloc(params->message.temporary_payload_data_length + 1);
-//		if (sub_message == NULL) {
-//			ESP_LOGE(TAG, "failed to allocate memory to receive message from topic `%s`", params->message.topic);
-//			return;
-//		}
-//		memcpy(sub_message, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
-//		sub_message[params->message.temporary_payload_data_length] = '\0';
-		
-		ota_url = (char *) malloc(params->message.temporary_payload_data_length + 1);
+	if (call_type == IOTC_SUB_CALL_MESSAGE && *params->message.topic == *subscribe_topic_command) {
+		ESP_LOGI(TAG, "command message received from %s", params->message.topic);
+		char *ota_url = (char *) malloc(params->message.temporary_payload_data_length + 1);
 		memcpy(ota_url, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
 		ota_url[params->message.temporary_payload_data_length] = '\0';
 		
 		ESP_LOGI(TAG, "command acknowledged: will update now with file %s", ota_url);
-		xTaskCreate(&ota_update_task, "simple_ota_task", 1024 * 8, NULL, 5, NULL);
-		
-//		free(sub_message);
+		ota_update(ota_url);
+		return;
 	}
 }
+
+void iotc_mqtt_config_event(iotc_context_handle_t in_context_handle, iotc_sub_call_type_t call_type, const iotc_sub_call_params_t *const params, iotc_state_t state, void *user_data) {
+	if (params == NULL && params->message.topic == NULL) {
+		ESP_LOGE(TAG, "malformed empty mqtt message received");
+		return;
+	}
+	
+	if (call_type == IOTC_SUB_CALL_SUBACK) {
+		ESP_LOGI(TAG, "mqtt subscribed successfully %s", params->message.topic);
+		return;
+	}
+	
+	if (call_type == IOTC_SUB_CALL_MESSAGE && *params->message.topic == *subscribe_topic_config) {
+		ESP_LOGI(TAG, "config message received from %s", params->message.topic);
+		char *config = (char *) malloc(params->message.temporary_payload_data_length + 1);
+		memcpy(config, params->message.temporary_payload_data, params->message.temporary_payload_data_length);
+		config[params->message.temporary_payload_data_length] = '\0';
+		apply_config(config);
+		return;
+	}
+}
+
 
 void iotc_mqtt_connection_event_handler(iotc_context_handle_t in_context_handle, void *data, iotc_state_t state) {
 	iotc_connection_data_t *conn_data = (iotc_connection_data_t *) data;
@@ -332,18 +360,20 @@ void iotc_mqtt_connection_event_handler(iotc_context_handle_t in_context_handle,
 		case IOTC_CONNECTION_STATE_OPENED:
 			ESP_LOGI(TAG, "iotc connection has opened successfully with known state %d", state);
 			
-//			subscribe to command topic
+//			subscribe to topic command
 //			for now we use this for commanding an update
 			asprintf(&subscribe_topic_command, SUBSCRIBE_TOPIC_COMMAND, DEVICE_ID);
 			ESP_LOGI(TAG, "subscribing to topic: `%s`", subscribe_topic_command);
-			iotc_subscribe(in_context_handle, subscribe_topic_command, IOTC_MQTT_QOS_AT_LEAST_ONCE, &iotc_mqtt_subscription_event_handler, NULL);
+			iotc_subscribe(in_context_handle, subscribe_topic_command, IOTC_MQTT_QOS_EXACTLY_ONCE, &iotc_mqtt_command_event, NULL);
 
-//			asprintf(&subscribe_topic_config, SUBSCRIBE_TOPIC_CONFIG, CONFIG_GIOT_DEVICE_ID);
-//			ESP_LOGI(TAG, "subscribe to topic: \"%s\"\n", subscribe_topic_config);
-//			iotc_subscribe(in_context_handle, subscribe_topic_config, IOTC_MQTT_QOS_AT_LEAST_ONCE, &iotc_mqttlogic_subscribe_callback, NULL);
+//			subscribe to topic config
+//			for now we use this for commanding an update
+			asprintf(&subscribe_topic_config, SUBSCRIBE_TOPIC_CONFIG, DEVICE_ID);
+			ESP_LOGI(TAG, "subscribing to topic: `%s`", subscribe_topic_config);
+			iotc_subscribe(in_context_handle, subscribe_topic_config, IOTC_MQTT_QOS_EXACTLY_ONCE, &iotc_mqtt_config_event, NULL);
 
 //			Create a timed task to publish every 10 seconds.
-			delayed_publish_task = iotc_schedule_timed_task(in_context_handle, iotc_mqtt_publish_message, 10, 1, NULL);
+			timed_publish_task = iotc_schedule_timed_task(in_context_handle, iotc_mqtt_publish_message, 10, 1, NULL);
 			break;
 
 //		IOTC_CONNECTION_STATE_OPEN_FAILED is set when there was a problem
