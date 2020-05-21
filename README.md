@@ -5,7 +5,7 @@ Features include:
 - Ready to remote deploy
 - Built over ESP32-DevKit-C, ESP-IDF, RealTimeOS, Google IOT Core SDK
 - HX711 driverless reading
-- IoT Core Messaging
+- IoT Core Messaging MQTT
 - OTA Updates
 - OTA Commands
 - Auto-recovery in any non mapped situation
