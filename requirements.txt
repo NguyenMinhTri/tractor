@@ -1,0 +1,2 @@
+github.com/espressif/esp-idf >= 4.1.0
+github.com/espressif/esp-google-iot = master

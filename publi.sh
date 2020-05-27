@@ -19,7 +19,7 @@ source "$IDF_PATH"/export.sh;
 # this builds the main app only
 idf.py app;
 
-bucket="heartflow-bin/espressif-devkitc-v4"
+bucket=$1
 file="tractor.$this_version_string.bin"
 gs_filepath="gs://$bucket/$file"
 gs_public_url="https://storage.googleapis.com/$bucket/$file"

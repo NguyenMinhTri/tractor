@@ -4,5 +4,5 @@ cmake_minimum_required(VERSION 3.5)
 set(CMAKE_CXX_STANDARD 14)
 
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-set (EXTRA_COMPONENT_DIRS "~/esp/esp-google-iot")
+set (EXTRA_COMPONENT_DIRS "/Users/esse/esp/esp-google-iot")
 project(tractor)

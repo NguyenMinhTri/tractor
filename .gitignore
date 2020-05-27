@@ -4,3 +4,6 @@
 .DS_Store
 *.old
 /.ipynb_checkpoints/
+/.vscode/
+sdkconfig
+main/certs/private_key.pem

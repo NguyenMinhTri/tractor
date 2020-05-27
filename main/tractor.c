@@ -17,6 +17,7 @@
 #include <esp_http_client.h>
 #include <esp_ota_ops.h>
 #include <esp_phy_init.h>
+#include <esp_netif.h>
 
 #define TAG "TractorApp"
 static const esp_app_desc_t *APP_DESC;
@@ -446,7 +447,7 @@ static void iotc_mqtt_connection_task(void *pvParameters) {
 	
 	char *device_path = NULL;
 	asprintf(&device_path, DEVICE_PATH, CONFIG_GIOT_PROJECT_ID, CONFIG_GIOT_LOCATION, CONFIG_GIOT_REGISTRY_ID, DEVICE_ID);
-	
+	ESP_LOGI(TAG, "%s", device_path);
 	
 	// this line is the connection at last
 	iotc_connect(iotc_context, NULL, jwt, device_path, connection_timeout, keepalive_timeout, &iotc_mqtt_connection_event_handler);
